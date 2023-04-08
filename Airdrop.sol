@@ -1,10 +1,11 @@
+// SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.0;
 
 import "@chainlink/contracts/src/v0.8/interfaces/LinkTokenInterface.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
-import "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
+import "@chainlink/contracts/src/v0.8/AutomationCompatible.sol";
 
-contract Airdrop {
+contract Airdrop is AutomationCompatible {
     struct StakeHolder {
         address stakeHolderAddress;
         uint256 amount;
@@ -55,21 +56,20 @@ contract Airdrop {
 
     function startAirdrop() external onlyOwner {
         require(stakeHolders.length >= airdropCount, "Not enough stakers");
-        Automation.requestRandomness(keyHash, fee, airdropCount);
+        requestRandomness(keyHash, fee, airdropCount);
     }
 
-    function fulfillRandomness(bytes32 requestId, uint256 randomness) external {
-        require(msg.sender == address(Automation), "Fulfillment only permitted from Automation");
+    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
+        require(msg.sender == address(automation), "Fulfillment only permitted from Automation");
         uint256[] memory selectedIndexes = new uint256[](airdropCount);
         uint256[] memory amounts = new uint256[](airdropCount);
 
         for (uint256 i = 0; i < airdropCount; i++) {
-            uint256 selectedIndex = Automation.uint256(randomness) % stakeHolders.length;
+            uint256 selectedIndex = uint256(keccak256(abi.encode(randomness, i))) % stakeHolders.length;
             selectedIndexes[i] = selectedIndex;
             uint256 selectedAmount = airdropAmount / airdropCount;
             amounts[i] = selectedAmount;
             require(token.transfer(stakeHolders[selectedIndex].stakeHolderAddress, selectedAmount), "Token transfer failed");
-            randomness = uint256(keccak256(abi.encode(randomness, selectedIndex, block.timestamp)));
         }
 
         emit AirdropCompleted(selectedIndexes, amounts);
