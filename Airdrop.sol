@@ -1,81 +1,93 @@
 pragma solidity ^0.8.0;
 
-import "@chainlink/contracts/src/v0.8/VRFConsumerBase.sol";
-import "@chainlink/contracts/src/v0.8/LinkTokenInterface.sol";
+import "@chainlink/contracts/src/v0.8/interfaces/LinkTokenInterface.sol";
 import "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import "@chainlink/contracts/src/v0.8/automation/AutomationCompatible.sol";
 
-interface IERC20 {
-    function transfer(address recipient, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-}
-
-contract Airdrop is VRFConsumerBase {
+contract Airdrop {
+    struct StakeHolder {
+        address stakeHolderAddress;
+        uint256 amount;
+    }
+    
     address public owner;
-    IERC20 public token;
-    mapping(address => bool) public hasReceivedAirdrop;
-    uint256 public airdropAmount;
-    uint256 public totalAirdrop;
-    uint256 public randomResult;
-    bytes32 public requestId;
-    uint256 public oracleFee;
+    LinkTokenInterface public token;
     AggregatorV3Interface internal priceFeed;
-
-    event AirdropSent(address recipient, uint256 amount);
-    event RandomNumberGenerated(uint256 randomNumber);
-    event RequestIdGenerated(bytes32 requestId);
+    bytes32 internal keyHash;
+    uint256 internal fee;
+    uint256 public totalStaked;
+    uint256 public minStake;
+    uint256 public maxStake;
+    uint256 public airdropAmount;
+    uint256 public airdropCount;
+    mapping(address => uint256) public stakes;
+    StakeHolder[] public stakeHolders;
 
     constructor(
-        address _tokenAddress,
-        uint256 _airdropAmount,
-        address _vrfCoordinator,
-        address _linkToken,
+        address _owner,
+        address _token,
+        address _priceFeed,
         bytes32 _keyHash,
         uint256 _fee,
-        address _priceFeed
-    ) VRFConsumerBase(_vrfCoordinator, _linkToken) {
-        owner = msg.sender;
-        token = IERC20(_tokenAddress);
-        airdropAmount = _airdropAmount;
-        oracleFee = _fee;
+        uint256 _minStake,
+        uint256 _maxStake,
+        uint256 _airdropAmount,
+        uint256 _airdropCount
+    ) {
+        owner = _owner;
+        token = LinkTokenInterface(_token);
         priceFeed = AggregatorV3Interface(_priceFeed);
-        token.approve(address(this), _airdropAmount * 100);
+        keyHash = _keyHash;
+        fee = _fee;
+        minStake = _minStake;
+        maxStake = _maxStake;
+        airdropAmount = _airdropAmount;
+        airdropCount = _airdropCount;
     }
 
-    function requestRandomNumber(uint256 seed) external onlyOwner {
-        require(LINK.balanceOf(address(this)) >= oracleFee, "Not enough LINK to pay oracle fee");
-        requestId = requestRandomness(keyHash, oracleFee, seed);
-        emit RequestIdGenerated(requestId);
+    function stake() external payable {
+        require(msg.value >= minStake, "Stake amount is too low");
+        require(msg.value <= maxStake, "Stake amount is too high");
+        totalStaked += msg.value;
+        stakes[msg.sender] += msg.value;
+        stakeHolders.push(StakeHolder(msg.sender, msg.value));
     }
 
-    function fulfillRandomness(bytes32 requestId, uint256 randomness) internal override {
-        randomResult = randomness;
-        emit RandomNumberGenerated(randomness);
+    function startAirdrop() external onlyOwner {
+        require(stakeHolders.length >= airdropCount, "Not enough stakers");
+        Automation.requestRandomness(keyHash, fee, airdropCount);
     }
 
-    function sendAirdrop(address[] memory recipients) external onlyOwner {
-        require(randomResult > 0, "Random number not generated");
-        uint256 startIndex = randomResult % recipients.length;
+    function fulfillRandomness(bytes32 requestId, uint256 randomness) external {
+        require(msg.sender == address(Automation), "Fulfillment only permitted from Automation");
+        uint256[] memory selectedIndexes = new uint256[](airdropCount);
+        uint256[] memory amounts = new uint256[](airdropCount);
 
-        for (uint256 i = 0; i < 100; i++) {
-            uint256 index = (startIndex + i) % recipients.length;
-
-            if (!hasReceivedAirdrop[recipients[index]]) {
-                require(token.balanceOf(address(this)) >= airdropAmount, "Insufficient token balance in contract");
-                require(token.transfer(recipients[index], airdropAmount), "Airdrop failed");
-                hasReceivedAirdrop[recipients[index]] = true;
-                totalAirdrop += airdropAmount;
-                emit AirdropSent(recipients[index], airdropAmount);
-            }
+        for (uint256 i = 0; i < airdropCount; i++) {
+            uint256 selectedIndex = Automation.uint256(randomness) % stakeHolders.length;
+            selectedIndexes[i] = selectedIndex;
+            uint256 selectedAmount = airdropAmount / airdropCount;
+            amounts[i] = selectedAmount;
+            require(token.transfer(stakeHolders[selectedIndex].stakeHolderAddress, selectedAmount), "Token transfer failed");
+            randomness = uint256(keccak256(abi.encode(randomness, selectedIndex, block.timestamp)));
         }
+
+        emit AirdropCompleted(selectedIndexes, amounts);
     }
 
-        function withdrawTokens() external onlyOwner {
-        uint256 tokenBalance = token.balanceOf(address(this));
-        require(token.transfer(msg.sender, tokenBalance), "Token withdrawal failed");
+    function withdraw() external onlyOwner {
+        token.transfer(owner, token.balanceOf(address(this)));
+    }
+
+    function withdrawLink() external onlyOwner {
+        token.transfer(owner, token.balanceOf(address(this)));
     }
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Only owner can call this function");
+        require(msg.sender == owner, "Only the contract owner can call this function.");
         _;
     }
+
+    event AirdropCompleted(uint256[] selectedIndexes, uint256[] amounts);
+
 }
